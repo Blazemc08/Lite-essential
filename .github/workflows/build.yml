@@ -1,0 +1,439 @@
+name: Build BlazeClient
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Generate and build BlazeClient
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.2.1'
+
+      # This workflow is intentionally self-contained: it writes the starter
+      # Fabric project into the runner before compiling it.
+      - name: Generate Fabric project
+        shell: bash
+        run: |
+          mkdir -p src/main/java/com/blaze/client src/main/resources
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  gradlePluginPortal()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'BlazeClient'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'net.fabricmc.fabric-loom-remap' version '1.17.13'
+          }
+
+          version = project.mod_version
+          group = project.maven_group
+
+          base {
+              archivesName = 'BlazeClient'
+          }
+
+          repositories {
+              maven { url = 'https://maven.fabricmc.net/' }
+              mavenCentral()
+          }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings loom.officialMojangMappings()
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+          }
+
+          java {
+              toolchain {
+                  languageVersion = JavaLanguageVersion.of(21)
+              }
+              withSourcesJar()
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              options.release = 21
+              options.encoding = 'UTF-8'
+          }
+
+          processResources {
+              inputs.property 'version', project.version
+              filesMatching('fabric.mod.json') {
+                  expand 'version': project.version
+              }
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3G
+          org.gradle.parallel=true
+          minecraft_version=1.21.11
+          loader_version=0.19.3
+          fabric_api_version=0.141.4+1.21.11
+          mod_version=0.1.0
+          maven_group=com.blaze
+          EOF
+
+          cat > src/main/resources/fabric.mod.json <<'EOF'
+          {
+            "schemaVersion": 1,
+            "id": "blazeclient",
+            "version": "${version}",
+            "name": "BlazeClient",
+            "description": "A local utility and menu client for Minecraft 1.21.11.",
+            "environment": "client",
+            "entrypoints": {
+              "client": ["com.blaze.client.BlazeClient"]
+            },
+            "depends": {
+              "fabricloader": ">=0.19.0",
+              "minecraft": "~1.21.11",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          EOF
+
+          cat > src/main/java/com/blaze/client/BlazeClient.java <<'EOF'
+          package com.blaze.client;
+
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
+          import net.minecraft.client.Minecraft;
+          import net.minecraft.client.gui.screens.PauseScreen;
+          import net.minecraft.client.gui.screens.Screen;
+          import net.minecraft.client.gui.screens.TitleScreen;
+          import net.minecraft.network.chat.Component;
+          import net.minecraft.resources.ResourceLocation;
+
+          public final class BlazeClient implements ClientModInitializer {
+              public static final String MOD_ID = "blazeclient";
+              @Override
+              public void onInitializeClient() {
+                  ClientFiles.ensureFolders();
+
+                  ScreenEvents.AFTER_INIT.register((client, screen, scaledWidth, scaledHeight) -> {
+                      if (screen instanceof TitleScreen || screen instanceof PauseScreen) {
+                          int x = scaledWidth - 112;
+                          int y = scaledHeight - 28;
+                          screen.addRenderableWidget(net.minecraft.client.gui.components.Button
+                              .builder(Component.literal("BlazeClient"), button ->
+                                  client.setScreen(new BlazeMenuScreen(screen)))
+                              .bounds(x, y, 104, 20)
+                              .build());
+                      }
+                  });
+              }
+
+              public static ResourceLocation id(String path) {
+                  return ResourceLocation.fromNamespaceAndPath(MOD_ID, path);
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/blaze/client/ClientFiles.java <<'EOF'
+          package com.blaze.client;
+
+          import net.minecraft.client.Minecraft;
+
+          import java.io.IOException;
+          import java.nio.file.Files;
+          import java.nio.file.Path;
+          import java.util.List;
+          import java.util.stream.Stream;
+
+          public final class ClientFiles {
+              private ClientFiles() {}
+
+              public static Path root() {
+                  return Minecraft.getInstance().gameDirectory.toPath().resolve("blazeclient");
+              }
+
+              public static Path skins() { return root().resolve("skins"); }
+              public static Path capes() { return root().resolve("capes"); }
+              public static Path cosmetics() { return root().resolve("cosmetics"); }
+              public static Path accountFile() { return root().resolve("accounts.txt"); }
+              public static Path screenshots() {
+                  return Minecraft.getInstance().gameDirectory.toPath().resolve("screenshots");
+              }
+
+              public static void ensureFolders() {
+                  try {
+                      Files.createDirectories(skins());
+                      Files.createDirectories(capes());
+                      Files.createDirectories(cosmetics());
+                      Files.createDirectories(root());
+                      if (!Files.exists(accountFile())) Files.createFile(accountFile());
+                  } catch (IOException e) {
+                      System.err.println("[BlazeClient] Cannot create data folders: " + e.getMessage());
+                  }
+              }
+
+              public static List<String> list(Path folder, String suffix) {
+                  try (Stream<Path> files = Files.list(folder)) {
+                      return files.filter(Files::isRegularFile)
+                          .filter(p -> p.getFileName().toString().toLowerCase().endsWith(suffix))
+                          .map(p -> p.getFileName().toString())
+                          .sorted()
+                          .toList();
+                  } catch (IOException e) {
+                      return List.of();
+                  }
+              }
+
+              public static List<String> accounts() {
+                  try {
+                      return Files.readAllLines(accountFile()).stream()
+                          .map(String::trim).filter(s -> !s.isEmpty()).distinct().limit(200).toList();
+                  } catch (IOException e) {
+                      return List.of();
+                  }
+              }
+
+              public static boolean addAccount(String username) {
+                  String clean = username == null ? "" : username.trim();
+                  if (!clean.matches("[A-Za-z0-9_]{3,16}")) return false;
+                  List<String> current = accounts();
+                  if (current.size() >= 200 || current.contains(clean)) return false;
+                  try {
+                      Files.writeString(accountFile(), clean + System.lineSeparator(),
+                          java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+                      return true;
+                  } catch (IOException e) {
+                      return false;
+                  }
+              }
+
+              public static boolean removeAccount(String username) {
+                  try {
+                      List<String> remaining = accounts().stream()
+                          .filter(s -> !s.equals(username)).toList();
+                      Files.write(accountFile(), remaining);
+                      return true;
+                  } catch (IOException e) {
+                      return false;
+                  }
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/blaze/client/BlazeMenuScreen.java <<'EOF'
+          package com.blaze.client;
+
+          import net.minecraft.client.Minecraft;
+          import net.minecraft.client.gui.GuiGraphics;
+          import net.minecraft.client.gui.components.Button;
+          import net.minecraft.client.gui.components.EditBox;
+          import net.minecraft.client.gui.screens.Screen;
+          import net.minecraft.network.chat.Component;
+
+          import java.nio.file.Path;
+          import java.util.ArrayList;
+          import java.util.List;
+
+          public final class BlazeMenuScreen extends Screen {
+              private final Screen parent;
+              private String page = "HOME";
+              private String notice = "Ready";
+              private EditBox usernameBox;
+              private int scroll = 0;
+
+              public BlazeMenuScreen(Screen parent) {
+                  super(Component.literal("BlazeClient"));
+                  this.parent = parent;
+              }
+
+              @Override
+              protected void init() {
+                  clearWidgets();
+                  int center = width / 2;
+
+                  addRenderableWidget(Button.builder(Component.literal("Home"), b -> open("HOME"))
+                      .bounds(12, 12, 70, 20).build());
+                  addRenderableWidget(Button.builder(Component.literal("Skins"), b -> open("SKINS"))
+                      .bounds(86, 12, 70, 20).build());
+                  addRenderableWidget(Button.builder(Component.literal("Capes"), b -> open("CAPES"))
+                      .bounds(160, 12, 70, 20).build());
+                  addRenderableWidget(Button.builder(Component.literal("Cosmetics"), b -> open("COSMETICS"))
+                      .bounds(234, 12, 85, 20).build());
+                  addRenderableWidget(Button.builder(Component.literal("Accounts"), b -> open("ACCOUNTS"))
+                      .bounds(323, 12, 85, 20).build());
+                  addRenderableWidget(Button.builder(Component.literal("Gallery"), b -> open("GALLERY"))
+                      .bounds(412, 12, 75, 20).build());
+
+                  addRenderableWidget(Button.builder(Component.literal("Back"), b -> onClose())
+                      .bounds(width - 82, height - 28, 70, 20).build());
+
+                  if (page.equals("ACCOUNTS")) {
+                      usernameBox = new EditBox(font, 24, height - 61, 150, 20,
+                          Component.literal("Username"));
+                      usernameBox.setHint(Component.literal("Offline username"));
+                      addRenderableWidget(usernameBox);
+                      addRenderableWidget(Button.builder(Component.literal("Add"), b -> {
+                          if (usernameBox != null && ClientFiles.addAccount(usernameBox.getValue())) {
+                              notice = "Username saved to local list.";
+                              usernameBox.setValue("");
+                          } else notice = "Invalid, duplicate, or account limit reached.";
+                          rebuildWidgets();
+                      }).bounds(180, height - 61, 55, 20).build());
+                  }
+
+                  if (page.equals("HOME")) {
+                      addRenderableWidget(Button.builder(Component.literal("Open Skin Folder"), b -> openFolder(ClientFiles.skins()))
+                          .bounds(center - 100, 92, 200, 22).build());
+                      addRenderableWidget(Button.builder(Component.literal("Open Cape Folder"), b -> openFolder(ClientFiles.capes()))
+                          .bounds(center - 100, 120, 200, 22).build());
+                      addRenderableWidget(Button.builder(Component.literal("Open Cosmetic Folder"), b -> openFolder(ClientFiles.cosmetics()))
+                          .bounds(center - 100, 148, 200, 22).build());
+                      addRenderableWidget(Button.builder(Component.literal("Open Screenshot Folder"), b -> openFolder(ClientFiles.screenshots()))
+                          .bounds(center - 100, 176, 200, 22).build());
+                  }
+
+                  List<String> items = currentItems();
+                  int startY = page.equals("ACCOUNTS") ? 55 : 65;
+                  for (int i = scroll; i < Math.min(items.size(), scroll + 8); i++) {
+                      String item = items.get(i);
+                      int row = i - scroll;
+                      addRenderableWidget(Button.builder(Component.literal(item), b -> {
+                          if (page.equals("ACCOUNTS")) {
+                              notice = "Selected " + item + " (local list only; session switching is not implemented).";
+                          } else {
+                              notice = "Selected " + item + ". Place/import files in the matching folder.";
+                          }
+                      }).bounds(24, startY + row * 25, Math.min(260, width - 48), 21).build());
+                  }
+
+                  if (page.equals("ACCOUNTS")) {
+                      addRenderableWidget(Button.builder(Component.literal("Remove last account"), b -> {
+                          List<String> a = ClientFiles.accounts();
+                          if (!a.isEmpty()) {
+                              ClientFiles.removeAccount(a.get(a.size() - 1));
+                              notice = "Last account removed.";
+                              rebuildWidgets();
+                          }
+                      }).bounds(245, height - 61, 145, 20).build());
+                  }
+              }
+
+              private void open(String target) {
+                  page = target;
+                  scroll = 0;
+                  notice = "Ready";
+                  rebuildWidgets();
+              }
+
+              private List<String> currentItems() {
+                  return switch (page) {
+                      case "SKINS" -> ClientFiles.list(ClientFiles.skins(), ".png");
+                      case "CAPES" -> ClientFiles.list(ClientFiles.capes(), ".png");
+                      case "COSMETICS" -> ClientFiles.list(ClientFiles.cosmetics(), ".bbmodel");
+                      case "ACCOUNTS" -> ClientFiles.accounts();
+                      case "GALLERY" -> ClientFiles.list(ClientFiles.screenshots(), ".png");
+                      default -> List.of();
+                  };
+              }
+
+              private void openFolder(Path path) {
+                  try {
+                      java.nio.file.Files.createDirectories(path);
+                      if (java.awt.Desktop.isDesktopSupported()) {
+                          java.awt.Desktop.getDesktop().open(path.toFile());
+                          notice = "Folder opened.";
+                      } else notice = "Folder: " + path;
+                  } catch (Exception e) {
+                      notice = "Could not open folder: " + e.getMessage();
+                  }
+              }
+
+              @Override
+              public void render(GuiGraphics graphics, int mouseX, int mouseY, float delta) {
+                  renderBackground(graphics, mouseX, mouseY, delta);
+                  graphics.fill(0, 0, width, height, 0xCC10151F);
+                  graphics.fill(0, 0, width, 42, 0xFF172333);
+                  graphics.drawString(font, "BLAZECLIENT  /  " + page, 18, 47, 0xFFFFFFFF);
+                  graphics.drawString(font, "Local files", 24, 55, 0xFF8CCBFF);
+                  if (page.equals("HOME")) {
+                      graphics.drawString(font, "Fabric 1.21.11 utility client", width / 2 - 100, 67, 0xFFFFFFFF);
+                      graphics.drawString(font, "Use the buttons below to open the local asset folders.", width / 2 - 145, 78, 0xFFB9C7D8);
+                  } else if (currentItems().isEmpty()) {
+                      graphics.drawCenteredString(font, "No files found. Put files in the BlazeClient folder.", width / 2, 85, 0xFFB9C7D8);
+                  }
+                  graphics.drawString(font, notice, 18, height - 42, 0xFFFFD479);
+                  super.render(graphics, mouseX, mouseY, delta);
+              }
+
+              @Override
+              public boolean keyPressed(net.minecraft.client.input.KeyEvent event) {
+                  if (event.key() == 256) {
+                      onClose();
+                      return true;
+                  }
+                  if (event.key() == 264) {
+                      scroll++;
+                      rebuildWidgets();
+                      return true;
+                  }
+                  if (event.key() == 265) {
+                      scroll = Math.max(0, scroll - 1);
+                      rebuildWidgets();
+                      return true;
+                  }
+                  return super.keyPressed(event);
+              }
+
+              @Override
+              public void onClose() {
+                  Minecraft.getInstance().setScreen(parent);
+              }
+          }
+          EOF
+
+          gradle wrapper --gradle-version 9.2.1
+
+      - name: Build mod JAR
+        run: ./gradlew build --no-daemon
+
+      - name: Upload JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlazeClient-Fabric-1.21.11
+          path: build/libs/*.jar
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload sources for debugging
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlazeClient-generated-source
+          path: |
+            src/
+            build/reports/
+          if-no-files-found: ignore
+          retention-days: 7
